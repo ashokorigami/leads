@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: origami_outbound_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: outbound
+      POSTGRES_USER: outbound
+      POSTGRES_PASSWORD: ${PGPASSWORD:?set in .env}
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outbound -d outbound"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+volumes:
+  pgdata:
+    name: origami_outbound_pgdata

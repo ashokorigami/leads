@@ -1,0 +1,19 @@
+# Secrets. Never commit.
+.env
+*.pem
+*.key
+
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local scratch
+/tmp/
+*.jar
+
+# Console password used to generate the Caddy hash. Never commit.
+.webpass
+
+# Run logs - operational noise, and they can contain prospect data.
+logs/
