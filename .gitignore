@@ -17,3 +17,8 @@ __pycache__/
 
 # Run logs - operational noise, and they can contain prospect data.
 logs/
+
+# Regenerable research output - data belongs in the database, not the repo.
+india_targets.json
+india_universe.json
+nse_universe.json

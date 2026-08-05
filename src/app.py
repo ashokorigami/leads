@@ -651,6 +651,10 @@ def targets(request: Request, country: str = "", segment: str = "",
               WHERE company_id = c.id ORDER BY created_at DESC LIMIT 1
             ) r ON TRUE
             WHERE {' AND '.join(where)}
+              AND NOT EXISTS (SELECT 1 FROM suppression sp
+                              WHERE (sp.kind = 'domain' AND sp.value = c.domain)
+                                 OR (sp.kind = 'name'
+                                     AND c.name ~* ('\\m' || sp.value || '\\M')))
             ORDER BY r.score DESC NULLS LAST, c.name
             LIMIT %(lim)s""", params)
         rowset = cur.fetchall()
@@ -709,6 +713,9 @@ def targets(request: Request, country: str = "", segment: str = "",
             f'The older rows fill in as they reach enrichment.</p>') if unknown else ""
 
     body = strip("Companies", stats()) + warn + filt + f"""
+      <p class="lede">Every company here is real, including the ones whose
+      website we could not read &mdash; those say <b>site unreachable</b> rather
+      than disappearing. <a class="more" href="/targets.csv?country={H.escape(country)}&amp;segment={H.escape(segment)}&amp;stage={H.escape(stage)}">Download this list as CSV</a></p>
       <h2>{len(rowset)} shown of {total} matching — highest score first</h2>
       <div class="tw"><table><thead><tr><th>Company</th><th>Country</th>
       <th>Staff</th><th>Segment</th><th>Offer</th><th>Score</th><th>Stage</th>
@@ -718,6 +725,72 @@ def targets(request: Request, country: str = "", segment: str = "",
         <div><h2>By segment and offer</h2><div class="tw"><table><tbody>{ss}</tbody></table></div></div>
       </div>"""
     return page("Companies", "targets", body, u)
+
+
+TARGETS_SQL = """
+    SELECT c.name, c.domain, c.country, c.employees, c.segment, s.offer,
+           c.stage::text, r.score, r.wedge, r.primary_trigger,
+           c.rejected_reason,
+           (SELECT t.detail FROM triggers t
+             WHERE t.company_id = c.id AND t.kind = 'profile'
+             ORDER BY t.observed_at DESC LIMIT 1) AS verified_quote,
+           (SELECT t.evidence_url FROM triggers t
+             WHERE t.company_id = c.id AND t.kind = 'profile'
+             ORDER BY t.observed_at DESC LIMIT 1) AS evidence_url
+    FROM companies c
+    LEFT JOIN segments s ON s.code = c.segment
+    LEFT JOIN LATERAL (
+      SELECT score, wedge, primary_trigger FROM research
+      WHERE company_id = c.id ORDER BY created_at DESC LIMIT 1
+    ) r ON TRUE
+    WHERE {where}
+      -- Suppressed companies are EXCLUDED, not merely marked rejected. The NDA
+      -- client's subsidiary appeared in a published target list with the status
+      -- 'rejected' next to it - which still printed the client's name in a
+      -- targeting document. Suppression has to mean absent.
+      AND NOT EXISTS (SELECT 1 FROM suppression sp
+                      WHERE (sp.kind = 'domain' AND sp.value = c.domain)
+                         OR (sp.kind = 'name'
+                             AND c.name ~* ('\\m' || sp.value || '\\M')))
+    ORDER BY r.score DESC NULLS LAST, c.name
+"""
+
+TARGET_COLS = ["company", "domain", "country", "employees", "segment", "offer",
+               "stage", "score", "wedge", "opening_fact", "why_not",
+               "verified_quote", "evidence_url"]
+
+
+@app.get("/targets.csv")
+def targets_csv(request: Request, country: str = "", segment: str = "",
+                stage: str = ""):
+    """The whole list, unreachable sites included.
+
+    A company whose website we could not read is still a real company - it is
+    reported with `stage = rejected` and a plain reason, never dropped. The
+    team can find those by hand.
+    """
+    import csv
+    import io
+    where, params = ["TRUE"], {}
+    if country:
+        where.append("c.country = %(country)s"); params["country"] = country
+    if segment:
+        where.append("c.segment = %(segment)s"); params["segment"] = segment
+    if stage:
+        where.append("c.stage::text = %(stage)s"); params["stage"] = stage
+    with db() as c_, c_.cursor() as cur:
+        cur.execute(TARGETS_SQL.format(where=" AND ".join(where)), params)
+        rows = cur.fetchall()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(TARGET_COLS)
+    for row in rows:
+        w.writerow(["" if v is None else v for v in row])
+    tag = "-".join(x for x in (country, segment, stage) if x) or "all"
+    return PlainTextResponse(
+        buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition":
+                 f'attachment; filename="origami-targets-{tag}.csv"'})
 
 
 @app.get("/territory", response_class=HTMLResponse)

@@ -47,16 +47,23 @@ def fetch(domain: str, max_pages: int = 3, timeout: float = 12.0) -> list[dict]:
     # redirect matched its own request url and was skipped - vale.com went from
     # 2 pages to 0 and the only reason I noticed was that it had worked before.
     out, asked, got = [], set(), set()
-    base = f"https://{domain.strip().lower().removeprefix('www.')}"
+    bare = domain.strip().lower().removeprefix("www.")
+    # Try the bare host first, then www. Plenty of large sites publish NO record
+    # for the apex at all - ambujacement.com resolves only as www.ambujacement.com
+    # - so stripping www unconditionally made them permanently unreachable.
+    hosts = [bare, f"www.{bare}"]
     with httpx.Client(follow_redirects=True, timeout=timeout,
                       headers={"User-Agent": UA,
                                # Without this, emirates.com served German and we
                                # would quote German back to an English reader.
                                "Accept-Language": "en-GB,en;q=0.9"}) as c:
-        for p in PATHS:
+        for host in hosts:
+          if out:                      # the first host that works is the site
+              break
+          for p in PATHS:
             if len(out) >= max_pages:
                 break
-            url = base + p
+            url = f"https://{host}{p}"
             if url in asked:
                 continue
             asked.add(url)

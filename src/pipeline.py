@@ -13,8 +13,28 @@ import company_profile
 QUALIFYING = ('hiring_eng','funding','exec_hire','weak_app','launch','headcount_growth')
 
 
-def suppressed(cur, domain: str) -> bool:
-    cur.execute("SELECT 1 FROM suppression WHERE kind='domain' AND value=%s", (domain,))
+def suppressed(cur, domain: str, name: str | None = None) -> bool:
+    """Domain match, plus whole-word NAME match.
+
+    Domain-only suppression missed sterlitecopper.com on 2026-08-02 and the NDA
+    client's own subsidiary was researched, scored 74, and reached a published
+    target list. Listing subsidiary domains one at a time will always miss the
+    next one.
+
+    The name match uses \\m..\\M word boundaries so 'Bhaktivedanta Hospital', an
+    unrelated Mumbai hospital, is NOT suppressed. Substring matching on names is
+    a recurring bug here - it caught me again in the very check written to find
+    this leak.
+    """
+    cur.execute("SELECT 1 FROM suppression WHERE kind='domain' AND value=%s",
+                (domain,))
+    if cur.fetchone():
+        return True
+    if not name:
+        return False
+    cur.execute("""SELECT 1 FROM suppression
+                   WHERE kind='name' AND %s ~* ('\\m' || value || '\\M')""",
+                (name,))
     return cur.fetchone() is not None
 
 
@@ -22,7 +42,9 @@ def run_one(cur, domain: str, verbose=True) -> str:
     """Returns the stage at which this company stopped."""
     domain = domain.lower().strip()
 
-    if suppressed(cur, domain):
+    cur.execute("SELECT name FROM companies WHERE domain=%s", (domain,))
+    _row = cur.fetchone()
+    if suppressed(cur, domain, _row[0] if _row else None):
         return "suppressed"
 
     # Cheap pre-screen. Enrichment costs a credit; job postings do not, and the
