@@ -168,7 +168,12 @@ def run_one(cur, domain: str, verbose=True) -> str:
         cur.execute("""INSERT INTO emails (prospect_id, step, subject, body, model)
                        VALUES (%s,1,%s,%s,%s)
                        ON CONFLICT (prospect_id, step) DO UPDATE SET
-                         subject=EXCLUDED.subject, body=EXCLUDED.body""",
+                         subject=EXCLUDED.subject, body=EXCLUDED.body,
+                         -- Approval attaches to the TEXT, not to the row. A
+                         -- rewrite that kept approved=TRUE would send a body no
+                         -- human ever read, so a rewritten draft goes back into
+                         -- the queue for a fresh decision.
+                         approved=NULL, approved_by=NULL, approved_at=NULL""",
                     (pid, e["subject"], e["body"], e.get("_model", "claude-fable-5")))
         written += 1
 
