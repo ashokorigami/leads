@@ -50,11 +50,30 @@ def ensure_campaign(name: str) -> str:
     })["id"]
 
 
-def push_approved(limit: int = 50) -> dict:
-    """Send every approved, unsent email to Instantly as a lead with its own
-    personalised body. Marks a row in `sends` so nothing is pushed twice."""
+def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
+    """Send approved, unsent emails to Instantly as leads with their own
+    personalised body. Marks a row in `sends` so nothing is pushed twice.
+
+    only_ids restricts the push to specific emails.id values. Without it there
+    was no way to send a SUBSET: the first real call would have pushed every
+    approved draft at once, so neither a single-address rehearsal nor a
+    controlled ramp (15 on day one, not "up to 50") was expressible.
+
+    Raises if no mailbox is live. The mailbox join is an INNER join, so with
+    zero live mailboxes the whole select returned no rows and this function
+    returned {"pushed": 0, "failed": 0} - a silent success that sent nothing.
+    Measured 19 Aug: 0 rows through the real query, 26 with the mailbox join
+    removed. A launch that reports success and sends nothing is worse than one
+    that fails, so this now refuses rather than returning a clean zero.
+    """
     pushed, failed = 0, 0
     with db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM mailboxes WHERE status='live'")
+        if not cur.fetchone()[0]:
+            raise RuntimeError(
+                "no mailbox has status='live' - push_approved would select zero "
+                "rows and report success having sent nothing. Mark the warmed "
+                "mailboxes live before sending.")
         cur.execute("""
             SELECT e.id, e.subject, e.body, p.email, p.first_name, p.last_name,
                    c.name, r.wedge, m.id
@@ -67,11 +86,16 @@ def push_approved(limit: int = 50) -> dict:
                           ORDER BY random() LIMIT 1) m ON TRUE
             WHERE e.approved IS TRUE
               AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.email_id = e.id)
-            LIMIT %s""", (limit,))
+              AND (%s::bigint[] IS NULL OR e.id = ANY(%s::bigint[]))
+            ORDER BY e.id
+            LIMIT %s""", (only_ids, only_ids, limit))
         rows = cur.fetchall()
 
+        campaigns: dict[str, str] = {}
         for eid, subj, body, email, fn, ln, co, wedge, mbid in rows:
-            cid = ensure_campaign(f"origami-{wedge}")
+            if wedge not in campaigns:
+                campaigns[wedge] = ensure_campaign(f"origami-{wedge}")
+            cid = campaigns[wedge]
             try:
                 res = _req("POST", "/leads", json={
                     "campaign": cid, "email": email,
