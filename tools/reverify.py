@@ -53,7 +53,8 @@ if APPLY and bad:
                 cur.execute("""UPDATE emails SET approved = FALSE, approved_by = 'reverify-invalid',
                                approved_at = now() WHERE id = %s""", (key,))
             else:
-                sender._req("DELETE", f"/leads/{key}")
+                # json={}: Instantly 400s an empty body under the client's JSON content-type
+                sender._req("DELETE", f"/leads/{key}", json={})
                 cur.execute("""UPDATE sends SET status = 'failed', error = 'removed: invalid on re-verify'
                                WHERE provider_msg_id = %s""", (key,))
             cur.execute("""INSERT INTO suppression (kind, value, reason) VALUES ('email', %s, 'reverify-invalid')
