@@ -110,7 +110,7 @@ def run_one(cur, domain: str, verbose=True, preset_people: list[dict] | None = N
     # available in markets Apollo cannot see. Stored so the researcher can quote
     # only what was actually fetched.
     try:
-        pages = company_profile.fetch(domain)
+        pages = company_profile.fetch(domain, name=org.get("name"))
         company_profile.store(cid, pages)
     except Exception:
         pages = []                     # best effort, never fatal
