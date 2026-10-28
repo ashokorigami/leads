@@ -102,7 +102,27 @@ def _domain_ok(email: str, company_domain: str) -> bool:
     at = email.split("@")[-1].lower()
     cd = company_domain.lower().replace("www.", "")
     root = ".".join(cd.split(".")[-3:]) if cd.count(".") > 1 else cd
-    return at == cd or at.endswith("." + cd) or at == root or cd.endswith("." + at)
+    if at == cd or at.endswith("." + cd) or at == root or cd.endswith("." + at):
+        return True
+    # Same brand under a country domain: Apollo lists Sanlam as sanlam.com but
+    # its staff write from @sanlam.co.za (likewise .co.ke, .com.ng). Measured
+    # 28 Oct: SuperSearch has 10,398 people at sanlam.co.za vs 286 at sanlam.com.
+    b = _brand(at)
+    if len(b) >= 3 and b == _brand(cd):
+        return True
+    # Brand top-level domain: Komatsu's staff write from @mining.komatsu.
+    return at.split(".")[-1] == _brand(cd) and len(_brand(cd)) >= 3
+
+
+_SLD = {"co", "com", "org", "net", "ac", "gov", "edu", "ltd", "plc"}
+
+
+def _brand(domain: str) -> str:
+    """'sanlam.co.za' -> 'sanlam', 'sanlam.com' -> 'sanlam', 'mail.mtn.com.ng' -> 'mtn'."""
+    parts = domain.lower().split(".")
+    if len(parts) >= 3 and parts[-2] in _SLD:
+        return parts[-3]
+    return parts[-2] if len(parts) >= 2 else domain
 
 
 def find(domain: str, wedge: str | None = None, want: int = 2) -> list[dict]:

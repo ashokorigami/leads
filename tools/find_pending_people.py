@@ -20,6 +20,8 @@ tools/write_pending.py afterwards to draft, which lands them in /queue.
     python3 tools/find_pending_people.py                 # dry run, no credits spent
     python3 tools/find_pending_people.py --limit 5 --apply
     python3 tools/find_pending_people.py --apply         # the rest
+    python3 tools/find_pending_people.py --domains a.com,b.co.za --apply
+    python3 tools/find_pending_people.py --instantly --apply   # Instantly fallback
 
 Run it from /opt/origami-outbound, never from /tmp (LESSONS.md sec.8).
 """
@@ -29,11 +31,18 @@ sys.path.insert(0, "/opt/origami-outbound/src")
 
 from config import db
 import prospects
+import instantly_contacts
 
 APPLY = "--apply" in sys.argv
 LIMIT = 0
 if "--limit" in sys.argv:
     LIMIT = int(sys.argv[sys.argv.index("--limit") + 1])
+DOMAINS = None
+# --instantly: when Apollo has no verified contact, try Instantly SuperSearch
+# before rejecting the company (spends Instantly credits, not Apollo's).
+INSTANTLY = "--instantly" in sys.argv
+if "--domains" in sys.argv:
+    DOMAINS = sys.argv[sys.argv.index("--domains") + 1].split(",")
 
 # Newest research row per company, the same ordering the send gate uses, so this
 # tool and v_sendable can never disagree about a company carrying several rows.
@@ -58,11 +67,12 @@ SELECT c.id, c.domain, c.name, r.score, r.wedge
    AND NOT EXISTS (SELECT 1 FROM suppression s
                     WHERE (s.kind='domain' AND s.value = c.domain)
                        OR (s.kind='name'   AND c.name ~* ('\\m' || s.value || '\\M')))
+   AND (%(domains)s::text[] IS NULL OR c.domain = ANY(%(domains)s::text[]))
  ORDER BY r.score DESC, c.id
 """
 
 with db() as c, c.cursor() as cur:
-    cur.execute(SQL + (" LIMIT %s" % LIMIT if LIMIT else ""))
+    cur.execute(SQL + (" LIMIT %d" % LIMIT if LIMIT else ""), {"domains": DOMAINS})
     rows = cur.fetchall()
 
 print(f"{len(rows)} qualified company/companies with no prospect"
@@ -81,6 +91,10 @@ found = nocontact = failed = people_total = 0
 for cid, dom, name, score, wedge in rows:
     try:
         people = prospects.find(dom, wedge, want=2)
+        if not people and INSTANTLY:
+            people = instantly_contacts.find(dom, wedge, want=2)
+            if people:
+                print(f"  {dom:<30} (via Instantly)")
     except Exception as ex:
         print(f"  {dom:<30} FAILED: {type(ex).__name__}: {ex}")
         failed += 1

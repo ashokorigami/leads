@@ -17,6 +17,7 @@ on is the only truthful source for where a company is; it is recorded as such.
     python3 tools/source_us.py --apply             # priority 1 segments
     python3 tools/source_us.py --apply --priority 2
     python3 tools/source_us.py --apply --segment engineering --pages 6
+    python3 tools/source_us.py --country "South Africa" --priority 2
 """
 import sys
 
@@ -27,6 +28,8 @@ import source
 from config import db
 
 COUNTRY = "United States"
+if "--country" in sys.argv:
+    COUNTRY = sys.argv[sys.argv.index("--country") + 1]
 
 APPLY = "--apply" in sys.argv
 PAGES = 4
