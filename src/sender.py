@@ -50,7 +50,24 @@ def ensure_campaign(name: str) -> str:
     })["id"]
 
 
-def ensure_rep_campaign(rep_key: str, mailbox: str) -> str:
+# Send window per region, in the recipient's morning. Instantly rejects some
+# IANA names (America/New_York, Africa/Johannesburg) - the ones below were
+# accepted on 28 Oct. Blantyre is UTC+2 with no DST, the same clock as Johannesburg.
+REGIONS = {
+    "us":     {"suffix": "",        "timezone": "America/Detroit",     "from": "09:00", "to": "16:00"},
+    "africa": {"suffix": "-africa", "timezone": "Africa/Blantyre",     "from": "08:00", "to": "15:00"},
+}
+AFRICA = {"South Africa", "Nigeria", "Kenya", "Egypt", "Ghana", "Morocco", "Ethiopia",
+          "Tanzania", "Uganda", "Rwanda", "Zambia", "Botswana", "Namibia", "Mauritius",
+          "Ivory Coast", "Côte d'Ivoire", "Senegal", "Tunisia", "Algeria", "Angola",
+          "Mozambique", "Zimbabwe", "Cameroon"}
+
+
+def region_of(country: str | None) -> str:
+    return "africa" if country in AFRICA else "us"
+
+
+def ensure_rep_campaign(rep_key: str, mailbox: str, region: str = "us") -> str:
     """One Instantly campaign PER REP, sending only from that rep's mailbox.
 
     2026-10-28: the first real push was about to go through ensure_campaign(),
@@ -63,7 +80,8 @@ def ensure_rep_campaign(rep_key: str, mailbox: str) -> str:
 
     Created PAUSED; activate_campaign() is a separate, deliberate step.
     """
-    name = f"origami-{rep_key}"
+    reg = REGIONS[region]
+    name = f"origami-{rep_key}{reg['suffix']}"
     for c in _req("GET", "/campaigns", params={"limit": 100}).get("items", []):
         if c.get("name") == name:
             return c["id"]
@@ -71,9 +89,9 @@ def ensure_rep_campaign(rep_key: str, mailbox: str) -> str:
         "name": name,
         "campaign_schedule": {"schedules": [{
             "name": "weekdays",
-            "timing": {"from": "09:00", "to": "16:00"},
+            "timing": {"from": reg["from"], "to": reg["to"]},
             "days": {"1": True, "2": True, "3": True, "4": True, "5": True},
-            "timezone": "America/Detroit",  # US Eastern; Instantly rejects America/New_York
+            "timezone": reg["timezone"],
         }]},
         "sequences": [{"steps": [{"type": "email", "delay": 0, "variants": [
             {"subject": "{{subject}}", "body": "{{body}}"}]}]}],
@@ -120,7 +138,7 @@ def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
         cur.execute("SELECT full_name FROM reps WHERE active")
         reps = [(n, n.split()[0].lower()) for (n,) in cur.fetchall()]
         cur.execute("""
-            SELECT e.id, e.subject, e.body, p.email, p.first_name, p.last_name, c.name
+            SELECT e.id, e.subject, e.body, p.email, p.first_name, p.last_name, c.name, c.country
             FROM emails e
             JOIN prospects p ON p.id = e.prospect_id
             JOIN companies c ON c.id = p.company_id
@@ -132,7 +150,7 @@ def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
         rows = cur.fetchall()
 
         campaigns: dict[str, str] = {}
-        for eid, subj, body, email, fn, ln, co in rows:
+        for eid, subj, body, email, fn, ln, co, country in rows:
             rep = _rep_for(body, reps)
             mb = next(((i, a) for i, a in live
                        if rep and a.split("@")[0] == rep[1]), None)
@@ -145,10 +163,11 @@ def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
                 continue
             mbid, addr = mb
             try:
-                if rep[1] not in campaigns:
-                    campaigns[rep[1]] = ensure_rep_campaign(rep[1], addr)
+                key = f"{rep[1]}{REGIONS[region_of(country)]['suffix']}"
+                if key not in campaigns:
+                    campaigns[key] = ensure_rep_campaign(rep[1], addr, region_of(country))
                 res = _req("POST", "/leads", json={
-                    "campaign": campaigns[rep[1]], "email": email,
+                    "campaign": campaigns[key], "email": email,
                     "first_name": fn, "last_name": ln, "company_name": co,
                     "custom_variables": {"subject": subj, "body": body},
                 })

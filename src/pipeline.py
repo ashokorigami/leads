@@ -9,6 +9,7 @@ import psycopg
 from config import db, SCORE_THRESHOLD
 import apollo, triggers, research, write, prospects, appstore
 import company_profile
+import instantly_contacts
 
 QUALIFYING = ('hiring_eng','funding','exec_hire','weak_app','launch','headcount_growth')
 
@@ -38,8 +39,11 @@ def suppressed(cur, domain: str, name: str | None = None) -> bool:
     return cur.fetchone() is not None
 
 
-def run_one(cur, domain: str, verbose=True) -> str:
-    """Returns the stage at which this company stopped."""
+def run_one(cur, domain: str, verbose=True, preset_people: list[dict] | None = None) -> str:
+    """Returns the stage at which this company stopped.
+
+    preset_people: contacts already found and verified elsewhere (people-first
+    sourcing) - used instead of spending Apollo reveal credits on new ones."""
     domain = domain.lower().strip()
 
     cur.execute("SELECT name FROM companies WHERE domain=%s", (domain,))
@@ -140,7 +144,15 @@ def run_one(cur, domain: str, verbose=True) -> str:
 
     cur.execute("UPDATE companies SET stage='qualified' WHERE id=%s", (cid,))
 
-    people = prospects.find(domain, r["wedge"], want=2)
+    people = preset_people or prospects.find(domain, r["wedge"], want=2)
+    if not people:
+        # Apollo's people data is thin outside the US (12 of 13 qualified
+        # companies had no contact on 28 Oct); Instantly SuperSearch is the
+        # fallback. Best effort: an Instantly outage must not lose the company.
+        try:
+            people = instantly_contacts.find(domain, r["wedge"], want=2)
+        except Exception:
+            people = []
     if not people:
         cur.execute("UPDATE companies SET stage='rejected', rejected_reason=%s WHERE id=%s",
                     ("no verified contact found", cid))

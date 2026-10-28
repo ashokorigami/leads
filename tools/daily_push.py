@@ -27,6 +27,7 @@ APPLY = "--apply" in sys.argv
 
 
 def campaigns() -> dict[str, dict]:
+    """origami-<rep> and origami-<rep>-<region>, keyed by the full suffix."""
     items = sender._req("GET", "/campaigns", params={"limit": 100})["items"]
     return {c["name"][len("origami-"):]: c for c in items if c["name"].startswith("origami-")}
 
@@ -82,9 +83,16 @@ def main() -> None:
             if rep:
                 pending.setdefault(rep[1], []).append(eid)
 
+    # One mailbox per rep sends for every region's campaign, and the 25/day
+    # cap is on the mailbox - so the target is per REP, summed over regions.
+    # push_approved() routes each draft to the right regional campaign.
+    queued_by_rep: dict[str, int] = {}
+    for key, c in camps.items():
+        rep = key.split("-")[0]
+        queued_by_rep[rep] = queued_by_rep.get(rep, 0) + queued(c["id"])
     ids: list[int] = []
-    for rep, c in sorted(camps.items()):
-        q = queued(c["id"])
+    for rep in sorted(set(queued_by_rep) | set(pending)):
+        q = queued_by_rep.get(rep, 0)
         avail = pending.get(rep, [])
         take = avail[: max(0, TARGET - q)]
         print(f"{rep:10s} queued {q:3d}  approved-unsent {len(avail):3d}  push {len(take)}")
