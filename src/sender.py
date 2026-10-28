@@ -8,6 +8,7 @@ are ever pushed, so a human gate sits in front of the send path by construction.
 """
 import json
 import httpx
+import time
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 from config import ENV, db
 
@@ -102,6 +103,20 @@ def ensure_rep_campaign(rep_key: str, mailbox: str, region: str = "us") -> str:
         "open_tracking": False,
         "link_tracking": False,
     })["id"]
+
+
+def verify_email(email: str, wait_s: int = 120) -> str:
+    """Instantly's verifier: 'verified', 'invalid', or 'pending' if it has not
+    answered within wait_s. ~0.25 Instantly credits.
+
+    Why at send time: on 28 Oct the first 45 sends bounced 2 - both Apollo
+    'verified' in Jul/Aug research, both people since gone. Verification ages."""
+    r = _req("POST", "/email-verification", json={"email": email})
+    deadline = time.time() + wait_s
+    while r.get("verification_status") == "pending" and time.time() < deadline:
+        time.sleep(5)
+        r = _req("GET", f"/email-verification/{email}")
+    return r.get("verification_status") or "pending"
 
 
 def activate_campaign(campaign_id: str) -> dict:

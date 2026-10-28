@@ -5,8 +5,9 @@ already queued but not yet contacted in each origami-<rep> campaign and pushes
 just enough approved drafts signed by that rep to bring it back to TARGET.
 
 Fails CLOSED on deliverability: if the bounce rate across the origami-*
-campaigns is above MAX_BOUNCE (with at least MIN_SENT sent), or the analytics
-call does not return the fields it needs, it pushes nothing and says why.
+campaigns is over the bar (see SMALL_*/LARGE_*), or the analytics call does not
+return the fields it needs, it pushes nothing and says why. Each address is
+re-verified just before it is pushed; invalid ones are unapproved and suppressed.
 
     python3 tools/daily_push.py            # dry run
     python3 tools/daily_push.py --apply
@@ -21,8 +22,11 @@ import sender
 from sender import db
 
 TARGET = 25
-MAX_BOUNCE = 0.03
-MIN_SENT = 20
+# Two bars. On a small sample one bounce moves the rate a lot: 28 Oct, 2 of 45
+# (4.4%) would have stopped all sending under a flat 3%, though 2 in 45 is
+# consistent with a ~2% true rate. So: >5% stops from 20 sent; >3% from 100.
+SMALL_N, SMALL_MAX = 20, 0.05
+LARGE_N, LARGE_MAX = 100, 0.03
 APPLY = "--apply" in sys.argv
 
 
@@ -50,15 +54,20 @@ def bounce_gate(camps: dict[str, dict]) -> str | None:
     sent = bounced = 0
     for c in camps.values():
         a = sender._req("GET", "/campaigns/analytics", params={"id": c["id"]})
-        a = a[0] if isinstance(a, list) else a
+        if isinstance(a, list):
+            if not a:                       # a campaign that has sent nothing yet
+                continue                    # returns [] - nothing to count
+            a = a[0]
         if "emails_sent_count" not in a or "bounced_count" not in a:
             return f"analytics for {c['name']} lacks sent/bounce fields: {sorted(a)}"
         sent += a["emails_sent_count"] or 0
         bounced += a["bounced_count"] or 0
     rate = bounced / sent if sent else 0.0
     print(f"deliverability: {bounced} bounced / {sent} sent = {rate:.1%}")
-    if sent >= MIN_SENT and rate > MAX_BOUNCE:
-        return f"bounce rate {rate:.1%} > {MAX_BOUNCE:.0%}"
+    if sent >= LARGE_N and rate > LARGE_MAX:
+        return f"bounce rate {rate:.1%} > {LARGE_MAX:.0%} over {sent} sent"
+    if sent >= SMALL_N and rate > SMALL_MAX:
+        return f"bounce rate {rate:.1%} > {SMALL_MAX:.0%} over {sent} sent"
     return None
 
 
@@ -73,15 +82,20 @@ def main() -> None:
         cur.execute("SELECT full_name FROM reps WHERE active")
         reps = [(n, n.split()[0].lower()) for (n,) in cur.fetchall()]
         cur.execute("""
-            SELECT e.id, e.body FROM emails e
+            SELECT e.id, e.body, p.email FROM emails e
+            JOIN prospects p ON p.id = e.prospect_id
             WHERE e.approved IS TRUE
               AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.email_id = e.id)
+              AND NOT EXISTS (SELECT 1 FROM suppression x
+                               WHERE x.kind = 'email' AND x.value = lower(p.email))
             ORDER BY e.id""")
         pending: dict[str, list[int]] = {}
-        for eid, body in cur.fetchall():
+        address: dict[int, str] = {}
+        for eid, body, email in cur.fetchall():
             rep = sender._rep_for(body, reps)
             if rep:
                 pending.setdefault(rep[1], []).append(eid)
+                address[eid] = email
 
     # One mailbox per rep sends for every region's campaign, and the 25/day
     # cap is on the mailbox - so the target is per REP, summed over regions.
@@ -91,12 +105,34 @@ def main() -> None:
         rep = key.split("-")[0]
         queued_by_rep[rep] = queued_by_rep.get(rep, 0) + queued(c["id"])
     ids: list[int] = []
+    invalid: list[int] = []
     for rep in sorted(set(queued_by_rep) | set(pending)):
         q = queued_by_rep.get(rep, 0)
         avail = pending.get(rep, [])
-        take = avail[: max(0, TARGET - q)]
+        need = max(0, TARGET - q)
+        take: list[int] = []
+        for eid in avail:
+            if len(take) >= need:
+                break
+            # Verify at push time, not at research time: addresses age (both
+            # 28 Oct bounces were 'verified' in Jul/Aug). Only 'invalid' is
+            # dropped; catch-all and no-answer go ahead. Dry runs skip it -
+            # each check costs Instantly credits.
+            if APPLY and sender.verify_email(address[eid]) == "invalid":
+                invalid.append(eid)
+                continue
+            take.append(eid)
         print(f"{rep:10s} queued {q:3d}  approved-unsent {len(avail):3d}  push {len(take)}")
         ids += take
+    if invalid:
+        with db() as conn, conn.cursor() as cur:
+            for eid in invalid:
+                cur.execute("""UPDATE emails SET approved = FALSE, approved_by = 'push-verify-invalid',
+                               approved_at = now() WHERE id = %s""", (eid,))
+                cur.execute("""INSERT INTO suppression (kind, value, reason)
+                               VALUES ('email', lower(%s), 'push-verify-invalid')
+                               ON CONFLICT (kind, value) DO NOTHING""", (address[eid],))
+        print(f"dropped {len(invalid)} invalid address(es) at push time")
     left = sum(len(v) for v in pending.values()) - len(ids)
     print(f"total push {len(ids)}; approved drafts left after this: {left}")
     if left < 3 * TARGET:

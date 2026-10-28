@@ -90,7 +90,10 @@ def ingest(from_email: str, subject: str, body: str, received_at,
                        body, received_at, classification, confidence, routed_rep_id,
                        routed_at, raw)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                               CASE WHEN %s IS NULL THEN NULL ELSE now() END, %s)
+                               -- ::bigint: with rep_id None (any reply not routed to a rep)
+                               -- Postgres cannot type a bare NULL parameter. Every poll failed
+                               -- from the first such reply, 28 Oct 13:50, until this cast.
+                               CASE WHEN %s::bigint IS NULL THEN NULL ELSE now() END, %s)
                        RETURNING id""",
                     (prospect_id, send_id, from_email, subject, body, received_at,
                      c["classification"], c["confidence"], rep_id, rep_id,
