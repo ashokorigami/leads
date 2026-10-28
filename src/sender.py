@@ -50,40 +50,80 @@ def ensure_campaign(name: str) -> str:
     })["id"]
 
 
+def ensure_rep_campaign(rep_key: str, mailbox: str) -> str:
+    """One Instantly campaign PER REP, sending only from that rep's mailbox.
+
+    2026-10-28: the first real push was about to go through ensure_campaign(),
+    which creates a campaign with no sequence, no sending accounts and no
+    activation (Instantly had zero campaigns) - leads would have been accepted
+    and nothing sent. And mailbox choice was random while the body is signed by
+    one rep, so an email signed "Abhaya" could leave from manjula@ and its reply
+    land in the wrong inbox. Pinning one campaign to one mailbox makes the From
+    address match the signature by construction.
+
+    Created PAUSED; activate_campaign() is a separate, deliberate step.
+    """
+    name = f"origami-{rep_key}"
+    for c in _req("GET", "/campaigns", params={"limit": 100}).get("items", []):
+        if c.get("name") == name:
+            return c["id"]
+    return _req("POST", "/campaigns", json={
+        "name": name,
+        "campaign_schedule": {"schedules": [{
+            "name": "weekdays",
+            "timing": {"from": "09:00", "to": "16:00"},
+            "days": {"1": True, "2": True, "3": True, "4": True, "5": True},
+            "timezone": "America/Detroit",  # US Eastern; Instantly rejects America/New_York
+        }]},
+        "sequences": [{"steps": [{"type": "email", "delay": 0, "variants": [
+            {"subject": "{{subject}}", "body": "{{body}}"}]}]}],
+        "email_list": [mailbox],
+        "daily_limit": 25,
+        "stop_on_reply": True,
+        "text_only": True,
+        "open_tracking": False,
+        "link_tracking": False,
+    })["id"]
+
+
+def activate_campaign(campaign_id: str) -> dict:
+    return _req("POST", f"/campaigns/{campaign_id}/activate", json={})
+
+
+def _rep_for(body: str, reps: list[tuple[str, str]]) -> tuple[str, str] | None:
+    """(full_name, key) of the rep whose name signs this body - exactly one, or None."""
+    hits = [r for r in reps if r[0] in body]
+    return hits[0] if len(hits) == 1 else None
+
+
 def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
     """Send approved, unsent emails to Instantly as leads with their own
-    personalised body. Marks a row in `sends` so nothing is pushed twice.
+    personalised body, each into the campaign of the rep who signed it.
+    Marks a row in `sends` so nothing is pushed twice.
 
-    only_ids restricts the push to specific emails.id values. Without it there
-    was no way to send a SUBSET: the first real call would have pushed every
-    approved draft at once, so neither a single-address rehearsal nor a
-    controlled ramp (15 on day one, not "up to 50") was expressible.
+    only_ids restricts the push to specific emails.id values (rehearsal, or a
+    controlled ramp: 15 on day one, not "up to 50").
 
-    Raises if no mailbox is live. The mailbox join is an INNER join, so with
-    zero live mailboxes the whole select returned no rows and this function
-    returned {"pushed": 0, "failed": 0} - a silent success that sent nothing.
-    Measured 19 Aug: 0 rows through the real query, 26 with the mailbox join
-    removed. A launch that reports success and sends nothing is worse than one
-    that fails, so this now refuses rather than returning a clean zero.
+    Raises if no mailbox is live - a launch that reports success and sends
+    nothing is worse than one that fails (measured 19 Aug: the old inner join
+    returned 0 rows with no live mailbox and reported a clean zero).
     """
     pushed, failed = 0, 0
     with db() as conn, conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM mailboxes WHERE status='live'")
-        if not cur.fetchone()[0]:
+        cur.execute("SELECT id, address FROM mailboxes WHERE status='live'")
+        live = cur.fetchall()
+        if not live:
             raise RuntimeError(
                 "no mailbox has status='live' - push_approved would select zero "
                 "rows and report success having sent nothing. Mark the warmed "
                 "mailboxes live before sending.")
+        cur.execute("SELECT full_name FROM reps WHERE active")
+        reps = [(n, n.split()[0].lower()) for (n,) in cur.fetchall()]
         cur.execute("""
-            SELECT e.id, e.subject, e.body, p.email, p.first_name, p.last_name,
-                   c.name, r.wedge, m.id
+            SELECT e.id, e.subject, e.body, p.email, p.first_name, p.last_name, c.name
             FROM emails e
             JOIN prospects p ON p.id = e.prospect_id
             JOIN companies c ON c.id = p.company_id
-            JOIN LATERAL (SELECT wedge FROM research WHERE company_id=c.id
-                          ORDER BY created_at DESC LIMIT 1) r ON TRUE
-            JOIN LATERAL (SELECT id FROM mailboxes WHERE status='live'
-                          ORDER BY random() LIMIT 1) m ON TRUE
             WHERE e.approved IS TRUE
               AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.email_id = e.id)
               AND (%s::bigint[] IS NULL OR e.id = ANY(%s::bigint[]))
@@ -92,15 +132,24 @@ def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
         rows = cur.fetchall()
 
         campaigns: dict[str, str] = {}
-        for eid, subj, body, email, fn, ln, co, wedge, mbid in rows:
-            if wedge not in campaigns:
-                campaigns[wedge] = ensure_campaign(f"origami-{wedge}")
-            cid = campaigns[wedge]
+        for eid, subj, body, email, fn, ln, co in rows:
+            rep = _rep_for(body, reps)
+            mb = next(((i, a) for i, a in live
+                       if rep and a.split("@")[0] == rep[1]), None)
+            if rep is None or mb is None:
+                why = "no single rep signature" if rep is None else f"no live mailbox for {rep[1]}"
+                cur.execute("""INSERT INTO sends (email_id, mailbox_id, provider, status, error)
+                               VALUES (%s,%s,'instantly','failed',%s)""",
+                            (eid, live[0][0], f"not pushed: {why}"))
+                failed += 1
+                continue
+            mbid, addr = mb
             try:
+                if rep[1] not in campaigns:
+                    campaigns[rep[1]] = ensure_rep_campaign(rep[1], addr)
                 res = _req("POST", "/leads", json={
-                    "campaign": cid, "email": email,
+                    "campaign": campaigns[rep[1]], "email": email,
                     "first_name": fn, "last_name": ln, "company_name": co,
-                    "personalization": body,
                     "custom_variables": {"subject": subj, "body": body},
                 })
                 cur.execute("""INSERT INTO sends (email_id, mailbox_id, provider,
@@ -113,7 +162,7 @@ def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
                                status, error) VALUES (%s,%s,'instantly','failed',%s)""",
                             (eid, mbid, str(ex)[:300]))
                 failed += 1
-    return {"pushed": pushed, "failed": failed}
+    return {"pushed": pushed, "failed": failed, "campaigns": campaigns}
 
 
 def pull_replies(since_iso: str | None = None) -> int:
