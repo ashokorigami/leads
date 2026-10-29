@@ -129,6 +129,20 @@ def _rep_for(body: str, reps: list[tuple[str, str]]) -> tuple[str, str] | None:
     return hits[0] if len(hits) == 1 else None
 
 
+# One company, one cold email. 29 Oct: the first 15-lead test batch went
+# entirely to companies emailed the day before (oldest drafts first = the same
+# companies), incl. a colleague of someone who had unsubscribed that morning.
+# Withdrawn before sending. Needs prospects aliased as p.
+COMPANY_NOT_CONTACTED = """
+  AND NOT EXISTS (SELECT 1 FROM sends s2 JOIN emails e2 ON e2.id = s2.email_id
+                  JOIN prospects p2 ON p2.id = e2.prospect_id
+                  WHERE p2.company_id = p.company_id
+                    AND s2.status IN ('queued', 'sent', 'bounced'))
+  AND NOT EXISTS (SELECT 1 FROM suppression x2
+                  WHERE x2.kind = 'email' AND x2.reason = 'unsubscribe'
+                    AND split_part(x2.value, '@', 2) = split_part(lower(p.email), '@', 2))"""
+
+
 def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
     """Send approved, unsent emails to Instantly as leads with their own
     personalised body, each into the campaign of the rep who signed it.
@@ -153,16 +167,19 @@ def push_approved(limit: int = 50, only_ids: list[int] | None = None) -> dict:
         cur.execute("SELECT full_name FROM reps WHERE active")
         reps = [(n, n.split()[0].lower()) for (n,) in cur.fetchall()]
         cur.execute("""
-            SELECT e.id, e.subject, e.body, p.email, p.first_name, p.last_name, c.name, c.country
+            SELECT e.id, e.subject, e.body, p.email, p.first_name, p.last_name, c.name, c.country, c.id
             FROM emails e
             JOIN prospects p ON p.id = e.prospect_id
             JOIN companies c ON c.id = p.company_id
             WHERE e.approved IS TRUE
               AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.email_id = e.id)
-              AND (%s::bigint[] IS NULL OR e.id = ANY(%s::bigint[]))
-            ORDER BY e.id
-            LIMIT %s""", (only_ids, only_ids, limit))
-        rows = cur.fetchall()
+              AND (%s::bigint[] IS NULL OR e.id = ANY(%s::bigint[]))""" + COMPANY_NOT_CONTACTED + """
+            ORDER BY e.id""", (only_ids, only_ids))
+        rows, seen = [], set()
+        for r in cur.fetchall():        # and only one per company within this push
+            if r[-1] not in seen and len(rows) < limit:
+                seen.add(r[-1])
+                rows.append(r[:-1])
 
         campaigns: dict[str, str] = {}
         for eid, subj, body, email, fn, ln, co, country in rows:

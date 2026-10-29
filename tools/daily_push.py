@@ -82,16 +82,21 @@ def main() -> None:
         cur.execute("SELECT full_name FROM reps WHERE active")
         reps = [(n, n.split()[0].lower()) for (n,) in cur.fetchall()]
         cur.execute("""
-            SELECT e.id, e.body, p.email FROM emails e
+            SELECT e.id, e.body, p.email, p.company_id FROM emails e
             JOIN prospects p ON p.id = e.prospect_id
             WHERE e.approved IS TRUE
               AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.email_id = e.id)
               AND NOT EXISTS (SELECT 1 FROM suppression x
-                               WHERE x.kind = 'email' AND x.value = lower(p.email))
+                               WHERE x.kind = 'email' AND x.value = lower(p.email))"""
+            + sender.COMPANY_NOT_CONTACTED + """
             ORDER BY e.id""")
         pending: dict[str, list[int]] = {}
         address: dict[int, str] = {}
-        for eid, body, email in cur.fetchall():
+        seen: set[int] = set()
+        for eid, body, email, company_id in cur.fetchall():
+            if company_id in seen:
+                continue
+            seen.add(company_id)
             rep = sender._rep_for(body, reps)
             if rep:
                 pending.setdefault(rep[1], []).append(eid)
