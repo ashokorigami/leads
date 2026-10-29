@@ -146,14 +146,18 @@ def main() -> None:
     res = sender.push_approved(limit=len(ids), only_ids=ids)
     print("pushed", res["pushed"], "failed", res["failed"])
     # Instantly marks a campaign completed (status 3) once every lead has been
-    # contacted; 5 of 6 were completed on 29 Oct. Whether new leads restart it
-    # is unmeasured, so say so loudly rather than assume they will send.
-    # Not reactivated here: status 2 is the emergency pause and must stay put.
+    # contacted; 5 of 6 were completed on 29 Oct. New leads in a completed
+    # campaign need it reactivated (measured 29 Oct: /activate on a completed
+    # campaign returns it to 1 and it stays there). Only 3 is reactivated -
+    # status 2 is the emergency pause and must stay put.
     for cid in set(res["campaigns"].values()):
         st = sender._req("GET", f"/campaigns/{cid}").get("status")
+        if st == 3:
+            st = sender.activate_campaign(cid).get("status")
+            print(f"reactivated completed campaign {cid} -> status {st}")
         if st != 1:
             print(f"WARNING: campaign {cid} has status {st} (1=active, 2=paused, 3=completed) "
-                  f"after the push - its new leads may not send")
+                  f"after the push - its new leads will not send")
 
 
 if __name__ == "__main__":
