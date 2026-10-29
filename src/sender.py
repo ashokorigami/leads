@@ -223,3 +223,53 @@ def pull_replies(since_iso: str | None = None) -> int:
                        prospect_id=row[0] if row else None)
             n += 1
     return n
+
+
+# Instantly lead status: 1 active, 2 paused, 3 completed, -1 bounced,
+# -2 unsubscribed, -3 skipped.
+LEAD_BOUNCED = -1
+
+
+def sync_sends() -> dict:
+    """Copy each pushed lead's real outcome from Instantly into `sends`.
+
+    2026-10-29: push_approved() writes status='queued' and nothing ever moved it
+    on, so every row stayed queued with sent_at NULL and the digest reported
+    "sent yesterday 0" the morning after 63 had gone out. Instantly is the only
+    place that knows; this reads it back. A lead Instantly no longer has (deleted
+    on re-verify) is left as it is rather than guessed at.
+    """
+    leads: dict[str, dict] = {}
+    for c in _req("GET", "/campaigns", params={"limit": 100}).get("items", []):
+        if not c["name"].startswith("origami-"):
+            continue
+        cur_id = None
+        while True:
+            body = {"campaign": c["id"], "limit": 100}
+            if cur_id:
+                body["starting_after"] = cur_id
+            d = _req("POST", "/leads/list", json=body)
+            for l in d["items"]:
+                leads[l["id"]] = l
+            cur_id = d.get("next_starting_after")
+            if not cur_id or not d["items"]:
+                break
+    out = {"sent": 0, "bounced": 0, "unchanged": 0, "missing": 0}
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT id, provider_msg_id, status FROM sends
+                       WHERE provider = 'instantly' AND status IN ('queued', 'sent')
+                         AND provider_msg_id IS NOT NULL""")
+        for sid, lead_id, status in cur.fetchall():
+            l = leads.get(lead_id)
+            if l is None:
+                out["missing"] += 1
+                continue
+            when = l.get("timestamp_last_contact")
+            new = "bounced" if l.get("status") == LEAD_BOUNCED else ("sent" if when else status)
+            if new == status:
+                out["unchanged"] += 1
+                continue
+            cur.execute("UPDATE sends SET status = %s, sent_at = COALESCE(sent_at, %s) WHERE id = %s",
+                        (new, when, sid))
+            out[new] += 1
+    return out

@@ -25,6 +25,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 sys.path.insert(0, "/opt/origami-outbound/src")
+sys.path.insert(0, "/opt/origami-outbound/tools")
 
 import review
 from config import ENV
@@ -38,12 +39,42 @@ def setting(key: str, default: str = "") -> str:
     never exports it, so os.environ alone would never see these."""
     return ENV.get(key) or os.environ.get(key) or default
 
+import sender
+
+# sends only knows what was pushed; Instantly knows what went out. Without this
+# the digest said "sent yesterday 0" on 29 Oct with 63 sent. If the sync fails
+# the digest still goes out, but says its numbers are stale.
+try:
+    synced = sender.sync_sends()
+    sync_note = None
+except Exception as ex:
+    synced, sync_note = None, f"  !! Instantly sync FAILED ({type(ex).__name__}: {ex}) - sent/bounce below are stale"
+
 d = review.digest()
 today = date.today().isoformat()
 
 lines = [f"Origami outbound - digest for {today}", ""]
 lines.append(f"  sent yesterday .......... {d['sent_yesterday']}")
 lines.append(f"  bounce rate ............. {d['bounce_rate']}%")
+# All-time comes from Instantly's analytics - the number daily_push's bounce
+# gate stops on. sends can undercount it: reverify.py deletes leads, and on
+# 28 Oct one it deleted had already been sent and bounced.
+try:
+    import daily_push
+    sent_all = bounced_all = 0
+    for c in daily_push.campaigns().values():
+        a = sender._req("GET", "/campaigns/analytics", params={"id": c["id"]})
+        a = (a[0] if a else {}) if isinstance(a, list) else a
+        sent_all += a.get("emails_sent_count") or 0
+        bounced_all += a.get("bounced_count") or 0
+    src = "Instantly"
+except Exception:
+    sent_all, bounced_all, src = d["sent_total"], d["bounced_total"], "local, may undercount"
+rate_all = 100 * bounced_all / sent_all if sent_all else 0
+gate = "  << push gate STOPS above 5%" if sent_all >= 20 and rate_all > 5 else ""
+lines.append(f"  all time ({src}) .. {sent_all} sent, {bounced_all} bounced ({rate_all:.1f}%){gate}")
+if sync_note:
+    lines.append(sync_note)
 lines.append(f"  awaiting your approval .. {d['awaiting_approval']}")
 lines.append(f"  companies queued ........ {d['companies_queued']}")
 lines.append(f"  replies ................. {d['replies'] or 'none'}")

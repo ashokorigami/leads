@@ -43,6 +43,10 @@ def digest(day: date | None = None) -> dict:
         cur.execute("""SELECT count(*) FILTER (WHERE status='bounced')::float
                        / NULLIF(count(*),0) FROM sends WHERE sent_at::date=%s""", (y,))
         out["bounce_rate"] = round((cur.fetchone()[0] or 0) * 100, 2)
+        # The bounce gate in daily_push is cumulative, so show the same number.
+        cur.execute("""SELECT count(*) FILTER (WHERE status IN ('sent','bounced')),
+                              count(*) FILTER (WHERE status='bounced') FROM sends""")
+        out["sent_total"], out["bounced_total"] = cur.fetchone()
         cur.execute("""SELECT classification, count(*) FROM replies
                        WHERE received_at::date=%s GROUP BY 1 ORDER BY 2 DESC""", (y,))
         out["replies"] = dict(cur.fetchall())
