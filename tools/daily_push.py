@@ -49,27 +49,39 @@ def queued(campaign_id: str) -> int:
             return n
 
 
+# The gate judges only addresses re-verified at push time - sends.id >= this.
+# 29 Oct (Ashok approved): the all-time rate (4/70, 5.7%) was set entirely by
+# 28 Oct pushes made before push-time re-verify existed; the 13-lead
+# re-verified test batch (sends 91-103) went out with 0 bounces. All-time can
+# never fall while the gate is shut, so judging it would stop sending for good.
+FIRST_VERIFIED_SEND_ID = 91
+
+
 def bounce_gate(camps: dict[str, dict]) -> str | None:
     """Return a reason to stop, or None if it is safe to push."""
     sent = bounced = 0
-    for c in camps.values():
+    for c in camps.values():               # all-time, for the log only
         a = sender._req("GET", "/campaigns/analytics", params={"id": c["id"]})
-        if isinstance(a, list):
-            if not a:                       # a campaign that has sent nothing yet
-                continue                    # returns [] - nothing to count
-            a = a[0]
-        if "emails_sent_count" not in a or "bounced_count" not in a:
-            return f"analytics for {c['name']} lacks sent/bounce fields: {sorted(a)}"
-        sent += a["emails_sent_count"] or 0
-        bounced += a["bounced_count"] or 0
+        a = (a[0] if a else {}) if isinstance(a, list) else a
+        sent += a.get("emails_sent_count") or 0
+        bounced += a.get("bounced_count") or 0
+    print(f"all time (Instantly): {bounced} bounced / {sent} sent")
+    try:
+        sender.sync_sends()
+    except Exception as ex:                # fail closed: stale outcomes can hide bounces
+        return f"could not sync send outcomes from Instantly: {type(ex).__name__}: {ex}"
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT count(*) FILTER (WHERE status IN ('sent','bounced')),
+                              count(*) FILTER (WHERE status = 'bounced')
+                       FROM sends WHERE id >= %s""", (FIRST_VERIFIED_SEND_ID,))
+        sent, bounced = cur.fetchone()
     rate = bounced / sent if sent else 0.0
-    print(f"deliverability: {bounced} bounced / {sent} sent = {rate:.1%}")
+    print(f"deliverability (re-verified sends): {bounced} bounced / {sent} sent = {rate:.1%}")
     if sent >= LARGE_N and rate > LARGE_MAX:
         return f"bounce rate {rate:.1%} > {LARGE_MAX:.0%} over {sent} sent"
     if sent >= SMALL_N and rate > SMALL_MAX:
         return f"bounce rate {rate:.1%} > {SMALL_MAX:.0%} over {sent} sent"
     return None
-
 
 def main() -> None:
     camps = campaigns()
