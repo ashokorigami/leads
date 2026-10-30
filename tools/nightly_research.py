@@ -19,12 +19,13 @@ Guards, because this runs unattended and every company costs credits:
 
     python3 tools/nightly_research.py                  # dry run: pool and plan only
     python3 tools/nightly_research.py --apply
-    python3 tools/nightly_research.py --apply --target 90 --max-companies 350
+    python3 tools/nightly_research.py --apply --target 90 --max-companies 350 --workers 4
 
 Run it from /opt/origami-outbound, never from /tmp (LESSONS.md sec.8).
 """
 import re
 import subprocess
+import threading
 import sys
 import time
 
@@ -38,10 +39,13 @@ TARGET = 90            # new companies with a draft; 75 sends + ~20% lost in rev
 MAX_COMPANIES = 350    # spend ceiling per night
 COUNTRY = "United States"
 MAX_CONSECUTIVE_ERRORS = 3
+WORKERS = 4
 if "--target" in sys.argv:
     TARGET = int(sys.argv[sys.argv.index("--target") + 1])
 if "--max-companies" in sys.argv:
     MAX_COMPANIES = int(sys.argv[sys.argv.index("--max-companies") + 1])
+if "--workers" in sys.argv:
+    WORKERS = int(sys.argv[sys.argv.index("--workers") + 1])
 if "--country" in sys.argv:
     COUNTRY = sys.argv[sys.argv.index("--country") + 1]
 
@@ -102,29 +106,53 @@ except Exception as e:
     stamp(f"ABORT: preflight Opus call failed ({type(e).__name__}: {e}) - no credits spent")
     raise SystemExit(2)
 
+# ~2.5-3.5 min per company measured 30 Oct, almost all of it waiting on Opus,
+# Fable and site fetches - one at a time, 350 companies is ~15 h. Workers run
+# companies side by side, each on its own connection.
 tally: dict[str, int] = {}
 queued = errors_in_row = tried = 0
-with db() as conn, conn.cursor() as cur:
-    for d in domains:
-        if queued >= TARGET:
-            break
-        tried += 1
-        try:
-            outcome = pipeline.run_one(cur, d, verbose=False)
-            errors_in_row = 0
-        except Exception as e:
-            cur.execute("""UPDATE companies SET stage='sourced', rejected_reason=%s
-                            WHERE domain=%s""", (f"retry after: {type(e).__name__}", d))
-            outcome = f"error: {type(e).__name__}"
-            errors_in_row += 1
-        if outcome.startswith("queued_"):
-            queued += 1
-        key = re.sub(r"_\d.*", "", outcome)     # queued_83_1emails -> queued
-        tally[key] = tally.get(key, 0) + 1
-        stamp(f"{tried:>4} {d:<32} {outcome}   [queued {queued}/{TARGET}]")
-        if errors_in_row >= MAX_CONSECUTIVE_ERRORS:
-            stamp(f"ABORT: {errors_in_row} errors in a row - stopping to protect credits")
-            break
+lock = threading.Lock()
+todo = iter(domains)
+stop = False
+
+
+def worker() -> None:
+    global queued, errors_in_row, tried, stop
+    with db() as conn, conn.cursor() as cur:
+        while True:
+            with lock:
+                if stop or queued >= TARGET:
+                    return
+                d = next(todo, None)
+                if d is None:
+                    return
+                tried += 1
+                n = tried
+            try:
+                outcome = pipeline.run_one(cur, d, verbose=False)
+                failed = False
+            except Exception as e:
+                cur.execute("""UPDATE companies SET stage='sourced', rejected_reason=%s
+                                WHERE domain=%s""", (f"retry after: {type(e).__name__}", d))
+                outcome = f"error: {type(e).__name__}"
+                failed = True
+            with lock:
+                errors_in_row = errors_in_row + 1 if failed else 0
+                if outcome.startswith("queued_"):
+                    queued += 1
+                key = re.sub(r"_\d.*", "", outcome)     # queued_83_1emails -> queued
+                tally[key] = tally.get(key, 0) + 1
+                stamp(f"{n:>4} {d:<32} {outcome}   [queued {queued}/{TARGET}]")
+                if errors_in_row >= MAX_CONSECUTIVE_ERRORS and not stop:
+                    stop = True
+                    stamp(f"ABORT: {errors_in_row} errors in a row - stopping to protect credits")
+
+
+threads = [threading.Thread(target=worker) for _ in range(WORKERS)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
 
 stamp(f"done: {tried} companies tried, {queued} newly queued (target {TARGET})")
 for k, v in sorted(tally.items(), key=lambda kv: -kv[1]):
