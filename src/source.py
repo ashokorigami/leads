@@ -99,6 +99,13 @@ def stage(rows: list[dict]) -> int:
                         (r["domain"],))
             if cur.fetchone():
                 continue
+            # The same Apollo org can come back under a second domain; the
+            # unique apollo_org_id then aborted the whole staging run (30 Oct).
+            if r.get("apollo_org_id"):
+                cur.execute("SELECT 1 FROM companies WHERE apollo_org_id=%s AND domain<>%s",
+                            (r["apollo_org_id"], r["domain"]))
+                if cur.fetchone():
+                    continue
             cur.execute("""INSERT INTO companies (domain, apollo_org_id, name,
                            employees, country, segment, stage)
                            VALUES (%s,%s,%s,%s,%s,%s,'sourced')
